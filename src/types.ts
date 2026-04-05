@@ -126,13 +126,31 @@ export interface FrameWorkerConfig {
   height?: number;
 }
 
+export type ClipStatus = 'pending' | 'rendering' | 'encoding' | 'done' | 'error';
+
+export interface ClipProgress {
+  index: number;
+  status: ClipStatus;
+  progress: number; // 0-1
+}
+
+export interface RichProgress {
+  overall: number; // 0-1, weighted average across all clips
+  clips: ClipProgress[];
+}
+
+/** Extends RenderOptions with rich per-clip progress reporting */
+export interface StitchOptions extends Omit<RenderOptions, 'onProgress'> {
+  onProgress?: (progress: RichProgress) => void;
+}
+
 export interface FrameWorker {
   /** Render a single clip to a Blob */
   render(clip: ClipInput, options?: RenderOptions): Promise<Blob>;
   /** Render a single clip and return an object URL */
   renderToUrl(clip: ClipInput, options?: RenderOptions): Promise<string>;
   /** Stitch multiple clips into one Blob */
-  stitch(clips: ClipInput[], options?: RenderOptions): Promise<Blob>;
+  stitch(clips: ClipInput[], options?: StitchOptions): Promise<Blob>;
   /** Stitch multiple clips and return an object URL */
-  stitchToUrl(clips: ClipInput[], options?: RenderOptions): Promise<string>;
+  stitchToUrl(clips: ClipInput[], options?: StitchOptions): Promise<string>;
 }

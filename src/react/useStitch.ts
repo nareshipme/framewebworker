@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
-import type { ClipInput, RenderOptions, FrameWorker } from '../types.js';
+import type { ClipInput, StitchOptions, RichProgress, FrameWorker } from '../types.js';
 
 export interface UseStitchState {
-  progress: number;
+  progress: RichProgress;
   isRendering: boolean;
   error: Error | null;
   blob: Blob | null;
@@ -12,16 +12,18 @@ export interface UseStitchState {
 }
 
 export interface UseStitchActions {
-  stitch: (clips: ClipInput[], options?: Omit<RenderOptions, 'onProgress' | 'signal'>) => Promise<Blob | null>;
+  stitch: (clips: ClipInput[], options?: Omit<StitchOptions, 'onProgress' | 'signal'>) => Promise<Blob | null>;
   cancel: () => void;
   reset: () => void;
 }
 
 export type UseStitchResult = UseStitchState & UseStitchActions;
 
+const INITIAL_PROGRESS: RichProgress = { overall: 0, clips: [] };
+
 export function useStitch(frameWorker: FrameWorker): UseStitchResult {
   const [state, setState] = useState<UseStitchState>({
-    progress: 0,
+    progress: INITIAL_PROGRESS,
     isRendering: false,
     error: null,
     blob: null,
@@ -40,13 +42,13 @@ export function useStitch(frameWorker: FrameWorker): UseStitchResult {
       URL.revokeObjectURL(urlRef.current);
       urlRef.current = null;
     }
-    setState({ progress: 0, isRendering: false, error: null, blob: null, url: null });
+    setState({ progress: INITIAL_PROGRESS, isRendering: false, error: null, blob: null, url: null });
   }, []);
 
   const stitch = useCallback(
     async (
       clips: ClipInput[],
-      options?: Omit<RenderOptions, 'onProgress' | 'signal'>
+      options?: Omit<StitchOptions, 'onProgress' | 'signal'>
     ): Promise<Blob | null> => {
       if (urlRef.current) {
         URL.revokeObjectURL(urlRef.current);
@@ -56,7 +58,7 @@ export function useStitch(frameWorker: FrameWorker): UseStitchResult {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      setState({ progress: 0, isRendering: true, error: null, blob: null, url: null });
+      setState({ progress: INITIAL_PROGRESS, isRendering: true, error: null, blob: null, url: null });
 
       try {
         const blob = await frameWorker.stitch(clips, {
@@ -69,7 +71,11 @@ export function useStitch(frameWorker: FrameWorker): UseStitchResult {
 
         const url = URL.createObjectURL(blob);
         urlRef.current = url;
-        setState({ progress: 1, isRendering: false, error: null, blob, url });
+        const doneProgress: RichProgress = {
+          overall: 1,
+          clips: clips.map((_, i) => ({ index: i, status: 'done', progress: 1 })),
+        };
+        setState({ progress: doneProgress, isRendering: false, error: null, blob, url });
         return blob;
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {

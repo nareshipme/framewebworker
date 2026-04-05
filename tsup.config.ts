@@ -30,4 +30,17 @@ export default defineConfig([
       options.conditions = ['browser'];
     },
   },
+  {
+    // Self-contained worker bundle — all deps inlined, no externals
+    entry: {
+      'worker/render-worker': 'src/worker/render-worker.ts',
+    },
+    format: ['esm'],
+    dts: false,
+    sourcemap: false,
+    splitting: false,
+    treeshake: true,
+    platform: 'browser',
+    // No external[] — captions.ts and its deps must be bundled in
+  },
 ]);
