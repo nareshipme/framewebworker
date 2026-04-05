@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
-import type { ClipInput, RenderOptions, FrameWorker } from '../types.js';
+import type { ClipInput, StitchOptions, FrameWorker } from '../types.js';
 
 export interface UseStitchState {
   progress: number;
@@ -12,7 +12,7 @@ export interface UseStitchState {
 }
 
 export interface UseStitchActions {
-  stitch: (clips: ClipInput[], options?: Omit<RenderOptions, 'onProgress' | 'signal'>) => Promise<Blob | null>;
+  stitch: (clips: ClipInput[], options?: Omit<StitchOptions, 'onProgress' | 'signal'>) => Promise<Blob | null>;
   cancel: () => void;
   reset: () => void;
 }
@@ -46,7 +46,7 @@ export function useStitch(frameWorker: FrameWorker): UseStitchResult {
   const stitch = useCallback(
     async (
       clips: ClipInput[],
-      options?: Omit<RenderOptions, 'onProgress' | 'signal'>
+      options?: Omit<StitchOptions, 'onProgress' | 'signal'>
     ): Promise<Blob | null> => {
       if (urlRef.current) {
         URL.revokeObjectURL(urlRef.current);
@@ -63,7 +63,7 @@ export function useStitch(frameWorker: FrameWorker): UseStitchResult {
           ...options,
           signal: controller.signal,
           onProgress: (p) => {
-            setState((prev) => ({ ...prev, progress: p }));
+            setState((prev) => ({ ...prev, progress: p.overall }));
           },
         });
 

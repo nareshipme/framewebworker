@@ -30,4 +30,21 @@ export default defineConfig([
       options.conditions = ['browser'];
     },
   },
+  {
+    // Worker bundle: self-contained ESM module loaded via new Worker(new URL(...))
+    entry: {
+      'render-worker': 'src/worker/render-worker.ts',
+    },
+    format: ['esm'],
+    dts: false,
+    sourcemap: true,
+    splitting: false,
+    treeshake: true,
+    // No externals — bundle captions.ts and everything else into the worker
+    external: [],
+    platform: 'browser',
+    esbuildOptions(options) {
+      options.conditions = ['browser'];
+    },
+  },
 ]);
