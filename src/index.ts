@@ -1,5 +1,8 @@
+// ── Type exports ─────────────────────────────────────────────────────────────
+
 export type {
-  ClipInput,
+  // Core
+  ClipSource,
   CaptionSegment,
   CaptionStyle,
   CaptionStylePreset,
@@ -12,21 +15,39 @@ export type {
   RendererBackend,
   FrameWorkerConfig,
   FrameWorker,
+  // Progress & metrics
   ClipStatus,
   ClipProgress,
   RichProgress,
-  StitchOptions,
   ClipMetrics,
   RenderMetrics,
+  // v0.2 API options
+  MergeOptions,
+  ExportOptions,
   Segment,
+  // Deprecated aliases (kept for soft migration)
+  ClipInput,
+  StitchOptions,
   SingleVideoRenderOptions,
 } from './types.js';
 
+// ── Value exports ─────────────────────────────────────────────────────────────
+
 export { STYLE_PRESETS } from './captions.js';
 export { FFmpegBackend, createFFmpegBackend } from './backends/ffmpeg.js';
-export { render, renderToUrl } from './render.js';
 
-import type { ClipInput, RenderOptions, StitchOptions, RenderMetrics, FrameWorkerConfig, FrameWorker, RendererBackend } from './types.js';
+// v0.2 top-level API
+export { exportClips, exportClipsToUrl } from './render.js';
+
+// Deprecated aliases (soft migration — will be removed in v0.3)
+/** @deprecated Use exportClips() */
+export { render } from './render.js';
+/** @deprecated Use exportClipsToUrl() */
+export { renderToUrl } from './render.js';
+
+// ── createFrameWorker ─────────────────────────────────────────────────────────
+
+import type { ClipSource, RenderOptions, MergeOptions, RenderMetrics, FrameWorkerConfig, FrameWorker, RendererBackend } from './types.js';
 import { extractFrames } from './compositor.js';
 import { stitchClips } from './stitch.js';
 
@@ -46,7 +67,7 @@ export function createFrameWorker(config: FrameWorkerConfig = {}): FrameWorker {
     return _backend;
   }
 
-  async function render(clip: ClipInput, options: RenderOptions = {}): Promise<Blob> {
+  async function render(clip: ClipSource, options: RenderOptions = {}): Promise<Blob> {
     const mergedOpts: RenderOptions = { fps, width, height, ...options };
     const backend = await getBackend();
 
@@ -68,21 +89,30 @@ export function createFrameWorker(config: FrameWorkerConfig = {}): FrameWorker {
     });
   }
 
-  async function renderToUrl(clip: ClipInput, options?: RenderOptions): Promise<string> {
+  async function renderToUrl(clip: ClipSource, options?: RenderOptions): Promise<string> {
     const blob = await render(clip, options);
     return URL.createObjectURL(blob);
   }
 
-  async function stitch(clips: ClipInput[], options: StitchOptions = {}): Promise<{ blob: Blob; metrics: RenderMetrics }> {
-    const mergedOpts: StitchOptions = { fps, width, height, ...options };
+  async function mergeClips(clips: ClipSource[], options: MergeOptions = {}): Promise<{ blob: Blob; metrics: RenderMetrics }> {
+    const mergedOpts: MergeOptions = { fps, width, height, ...options };
     const backend = await getBackend();
     return stitchClips(clips, backend, mergedOpts);
   }
 
-  async function stitchToUrl(clips: ClipInput[], options?: StitchOptions): Promise<{ url: string; metrics: RenderMetrics }> {
-    const { blob, metrics } = await stitch(clips, options);
+  async function mergeClipsToUrl(clips: ClipSource[], options?: MergeOptions): Promise<{ url: string; metrics: RenderMetrics }> {
+    const { blob, metrics } = await mergeClips(clips, options);
     return { url: URL.createObjectURL(blob), metrics };
   }
 
-  return { render, renderToUrl, stitch, stitchToUrl };
+  return {
+    render,
+    renderToUrl,
+    mergeClips,
+    mergeClipsToUrl,
+    /** @deprecated Use mergeClips() */
+    stitch: mergeClips,
+    /** @deprecated Use mergeClipsToUrl() */
+    stitchToUrl: mergeClipsToUrl,
+  };
 }

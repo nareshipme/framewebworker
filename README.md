@@ -8,12 +8,11 @@
 
 ## Features
 
-- **Trim** any video to a time range
+- **Export segments** from a single source video with `exportClips()`
+- **Merge clips** from multiple source videos with `mergeClips()`
 - **Overlay captions** with built-in style presets (`hormozi`, `modern`, `minimal`, `bold`)
-- **Stitch** multiple source videos into one export
-- **Render** multiple segments from a single source video (more efficient for highlight reels, clip editors)
 - **Parallel rendering** via OffscreenCanvas + Web Workers — automatic on supported browsers
-- **Timing metrics** — per-clip extraction/encoding times, overall FPS throughput
+- **Timing metrics** — per-segment extraction/encoding times, overall FPS throughput
 - **Pluggable renderer backend** (default: ffmpeg.wasm)
 - **Framework-agnostic core** + React hooks (`framewebworker/react`)
 - **TypeScript-first** with full type exports
@@ -25,38 +24,40 @@
 npm install framewebworker @ffmpeg/ffmpeg @ffmpeg/util
 ```
 
-> `@ffmpeg/ffmpeg` and `@ffmpeg/util` are optional peer dependencies required only by the default ffmpeg.wasm backend. If you supply your own backend you don't need them.
+> `@ffmpeg/ffmpeg` and `@ffmpeg/util` are optional peer dependencies required only by the default ffmpeg.wasm backend.
 
 ---
 
 ## Which API should I use?
 
-| | `render()` | `stitch()` |
+| | `exportClips()` | `mergeClips()` |
 |---|---|---|
 | **Source videos** | One URL, multiple time ranges | Multiple clips, each with its own source |
-| **Best for** | Highlight reels, multi-segment exports from one file | Joining clips from different files |
+| **Best for** | Highlight reels, chapter exports, clip editors | Joining footage from different files |
 | **Video loading** | Loads the source once, seeks per segment | Loads each source independently |
-| **Progress** | `RichProgress` with per-segment status | `RichProgress` with per-clip status |
-| **Metrics** | `RenderMetrics` on completion | `RenderMetrics` on completion |
+| **React hook** | `useExportClips(videoUrl, segments)` | `useMergeClips(fw)` |
 
-Both APIs produce an identical output: a single concatenated MP4 `Blob`.
+Both produce a single concatenated MP4 `Blob` and return `RenderMetrics`.
 
 ---
 
-## `render()` — One video, multiple segments
+## `exportClips()` — One video, multiple time segments
 
-Use this when you're exporting multiple time ranges from the **same source file** — a clip editor, a highlight reel generator, a chapter trimmer.
+Use this when you're exporting multiple time ranges from the **same source file**.
 
 ```ts
-import { render } from 'framewebworker';
+import { exportClips } from 'framewebworker';
+import type { Segment, ExportOptions } from 'framewebworker';
 
-const { blob, metrics } = await render(
+const segments: Segment[] = [
+  { start: 10, end: 25 },
+  { start: 42, end: 58 },
+  { start: 90, end: 110 },
+];
+
+const { blob, metrics } = await exportClips(
   'https://example.com/interview.mp4',
-  [
-    { start: 10, end: 25 },
-    { start: 42, end: 58 },
-    { start: 90, end: 110 },
-  ],
+  segments,
   {
     width: 1280,
     height: 720,
@@ -65,8 +66,8 @@ const { blob, metrics } = await render(
       console.log(`Overall: ${Math.round(overall * 100)}%`);
       clips.forEach(c => console.log(`  segment ${c.index}: ${c.status}`));
     },
-    onComplete: (metrics) => {
-      console.log(`Done in ${metrics.totalMs.toFixed(0)}ms — ${metrics.framesPerSecond.toFixed(1)} fps`);
+    onComplete: (m) => {
+      console.log(`Done in ${m.totalMs.toFixed(0)}ms — ${m.framesPerSecond.toFixed(1)} fps`);
     },
   }
 );
@@ -74,10 +75,12 @@ const { blob, metrics } = await render(
 const url = URL.createObjectURL(blob);
 ```
 
-### With captions per segment
+### With per-segment captions
+
+Caption timestamps are absolute (matching the source video timeline):
 
 ```ts
-import { render } from 'framewebworker';
+import { exportClips } from 'framewebworker';
 import type { Segment } from 'framewebworker';
 
 const segments: Segment[] = [
@@ -98,23 +101,20 @@ const segments: Segment[] = [
   },
 ];
 
-const { blob } = await render('https://example.com/video.mp4', segments, {
+const { blob } = await exportClips('https://example.com/video.mp4', segments, {
   width: 1080,
   height: 1920, // 9:16 portrait
-  fps: 30,
 });
 ```
 
-Caption timestamps in `Segment.captions` are **absolute** (relative to the source video), matching the segment's `start`/`end` range.
-
-### `renderToUrl()`
+### `exportClipsToUrl()`
 
 Convenience wrapper that returns an object URL directly:
 
 ```ts
-import { renderToUrl } from 'framewebworker';
+import { exportClipsToUrl } from 'framewebworker';
 
-const { url, metrics } = await renderToUrl(
+const { url, metrics } = await exportClipsToUrl(
   'https://example.com/video.mp4',
   [{ start: 5, end: 30 }]
 );
@@ -124,22 +124,35 @@ videoElement.src = url;
 
 ---
 
-## `stitch()` — Multiple source videos
+## `mergeClips()` — Multiple source videos
 
-Use this when you're joining clips from **different source files**.
+Use this when joining clips from **different source files** via a `FrameWorker` instance.
 
 ```ts
+import { createFrameWorker } from 'framewebworker';
+import type { ClipSource } from 'framewebworker';
+
 const fw = createFrameWorker();
 
-const { blob, metrics } = await fw.stitch([
+const clips: ClipSource[] = [
   { source: fileA, startTime: 0,  endTime: 10 },
   { source: fileB, startTime: 5,  endTime: 20 },
   { source: fileC, startTime: 12, endTime: 25 },
-], {
+];
+
+const { blob, metrics } = await fw.mergeClips(clips, {
   width: 1920,
   height: 1080,
   onProgress: ({ overall }) => console.log(`${Math.round(overall * 100)}%`),
+  onComplete: (m) => console.log(`${m.framesPerSecond.toFixed(1)} fps`),
 });
+```
+
+### `mergeClipsToUrl()`
+
+```ts
+const { url, metrics } = await fw.mergeClipsToUrl(clips, { width: 1280, height: 720 });
+videoElement.src = url;
 ```
 
 ---
@@ -148,18 +161,19 @@ const { blob, metrics } = await fw.stitch([
 
 Import from `framewebworker/react`.
 
-### `useRender` — single video, multiple segments
+### `useExportClips` — single video, multiple segments
 
 ```tsx
-import { useRender } from 'framewebworker/react';
+import { useExportClips } from 'framewebworker/react';
+import type { Segment } from 'framewebworker';
+
+const segments: Segment[] = [
+  { start: 10, end: 25 },
+  { start: 60, end: 80 },
+];
 
 export function HighlightExporter({ videoUrl }: { videoUrl: string }) {
-  const segments = [
-    { start: 10, end: 25 },
-    { start: 60, end: 80 },
-  ];
-
-  const { start, cancel, isRendering, progress, metrics, url, error } = useRender(
+  const { start, cancel, isRendering, progress, metrics, url, error } = useExportClips(
     videoUrl,
     segments,
     { width: 1280, height: 720, fps: 30 }
@@ -168,7 +182,9 @@ export function HighlightExporter({ videoUrl }: { videoUrl: string }) {
   return (
     <div>
       <button onClick={start} disabled={isRendering}>
-        {isRendering ? `Rendering… ${Math.round((progress?.overall ?? 0) * 100)}%` : 'Export'}
+        {isRendering
+          ? `Rendering… ${Math.round((progress?.overall ?? 0) * 100)}%`
+          : 'Export'}
       </button>
       <button onClick={cancel} disabled={!isRendering}>Cancel</button>
 
@@ -185,13 +201,13 @@ export function HighlightExporter({ videoUrl }: { videoUrl: string }) {
 }
 ```
 
-`useRender` signature:
+`useExportClips` signature:
 
 ```ts
-function useRender(
+function useExportClips(
   videoUrl: string | null,
   segments: Segment[],
-  options?: Omit<SingleVideoRenderOptions, 'onProgress' | 'onComplete' | 'signal'>
+  options?: Omit<ExportOptions, 'onProgress' | 'onComplete' | 'signal'>
 ): {
   start: () => void;
   cancel: () => void;
@@ -203,20 +219,21 @@ function useRender(
 }
 ```
 
-Passing `null` as `videoUrl` disables the hook; calling `start()` is a no-op until it's set.
+Passing `null` as `videoUrl` disables the hook; `start()` is a no-op until it is set.
 
-### `useStitch` — multiple source clips
+### `useMergeClips` — multiple source clips
 
 ```tsx
-import { useStitch } from 'framewebworker/react';
+import { createFrameWorker } from 'framewebworker';
+import { useMergeClips } from 'framewebworker/react';
 
 const fw = createFrameWorker();
 
-export function StitchPanel() {
-  const { stitch, isRendering, progress, metrics, url } = useStitch(fw);
+export function MergePanel() {
+  const { mergeClips, isRendering, progress, metrics, url } = useMergeClips(fw);
 
   const handleExport = () =>
-    stitch([
+    mergeClips([
       { source: fileA, startTime: 0, endTime: 10 },
       { source: fileB, startTime: 5, endTime: 20 },
     ]);
@@ -232,54 +249,56 @@ export function StitchPanel() {
 }
 ```
 
-### `useClipRender` — single clip via FrameWorker instance
+### `usePreviewClip` — single clip via FrameWorker instance
 
-For rendering a single `ClipInput` through a `FrameWorker` instance (the v0.1.x API):
+For rendering a single `ClipSource` through a `FrameWorker` instance:
 
 ```tsx
-import { useClipRender } from 'framewebworker/react';
+import { createFrameWorker } from 'framewebworker';
+import { usePreviewClip } from 'framewebworker/react';
+import type { ClipSource } from 'framewebworker';
 
 const fw = createFrameWorker();
 
-export function ClipExporter({ file }: { file: File }) {
-  const { render, isRendering, progress, url } = useClipRender(fw);
+export function ClipPreview({ file }: { file: File }) {
+  const { render, isRendering, progress, url } = usePreviewClip(fw);
+
+  const clip: ClipSource = { source: file, startTime: 0, endTime: 30 };
 
   return (
-    <button onClick={() => render({ source: file, startTime: 0, endTime: 30 })} disabled={isRendering}>
-      {isRendering ? `${Math.round(progress * 100)}%` : 'Export clip'}
+    <button onClick={() => render(clip)} disabled={isRendering}>
+      {isRendering ? `${Math.round(progress * 100)}%` : 'Preview clip'}
     </button>
   );
 }
 ```
 
-> Previously exported as `useRender`. If you were using `useRender(fw)` from an earlier version, rename it to `useClipRender(fw)`.
-
 ---
 
 ## `RenderMetrics` — timing output
 
-Both `render()` and `stitch()` resolve with `{ blob, metrics }`. `onComplete` also receives the same object.
+Both `exportClips()` and `mergeClips()` resolve with `{ blob, metrics }`. `onComplete` also receives the same object.
 
 ```ts
 interface RenderMetrics {
-  totalMs: number;        // wall-clock time for the entire operation
-  extractionMs: number;   // sum of all segment/clip frame-extraction times
-  encodingMs: number;     // sum of all segment/clip ffmpeg encoding times
-  stitchMs: number;       // time for the final ffmpeg concat pass
+  totalMs: number;         // wall-clock time for the entire operation
+  extractionMs: number;    // sum of all segment/clip frame-extraction times
+  encodingMs: number;      // sum of all segment/clip ffmpeg encoding times
+  stitchMs: number;        // time for the final ffmpeg concat pass
   framesPerSecond: number; // total frames / (totalMs / 1000)
-  clips: ClipMetrics[];   // one entry per segment or clip
+  clips: ClipMetrics[];    // one entry per segment or clip
 }
 
 interface ClipMetrics {
-  clipId: string;         // segment index (as string)
+  clipId: string;          // segment index (as string)
   extractionMs: number;
   encodingMs: number;
-  totalMs: number;        // extractionMs + encodingMs
+  totalMs: number;         // extractionMs + encodingMs
   framesExtracted: number;
 }
 ```
 
-Example output for a three-segment render:
+Example output for a three-segment export:
 
 ```ts
 {
@@ -289,7 +308,7 @@ Example output for a three-segment render:
   stitchMs: 120,
   framesPerSecond: 94.2,
   clips: [
-    { clipId: '0', extractionMs: 980, encodingMs: 510, totalMs: 1490, framesExtracted: 450 },
+    { clipId: '0', extractionMs: 980,  encodingMs: 510, totalMs: 1490, framesExtracted: 450 },
     { clipId: '1', extractionMs: 1050, encodingMs: 560, totalMs: 1610, framesExtracted: 480 },
     { clipId: '2', extractionMs: 1070, encodingMs: 530, totalMs: 1600, framesExtracted: 510 },
   ]
@@ -298,9 +317,11 @@ Example output for a three-segment render:
 
 ---
 
-## `SingleVideoRenderOptions`
+## `ExportOptions` / `MergeOptions`
 
-Options accepted by `render()` / `renderToUrl()` / `useRender()`:
+`ExportOptions` is accepted by `exportClips()` / `exportClipsToUrl()` / `useExportClips()`.
+`MergeOptions` is accepted by `mergeClips()` / `mergeClipsToUrl()` / `useMergeClips()`.
+Both have identical fields:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -311,15 +332,15 @@ Options accepted by `render()` / `renderToUrl()` / `useRender()`:
 | `quality` | `number` | `0.92` | Quality 0–1 (non-ffmpeg backends) |
 | `encoderOptions` | `Record<string, unknown>` | — | Extra options passed to the backend |
 | `signal` | `AbortSignal` | — | Cancellation signal |
-| `onProgress` | `(p: RichProgress) => void` | — | Called on every frame batch with per-segment status |
+| `onProgress` | `(p: RichProgress) => void` | — | Called on every frame batch |
 | `onComplete` | `(m: RenderMetrics) => void` | — | Called once when the final blob is ready |
 
 `RichProgress` shape:
 
 ```ts
 interface RichProgress {
-  overall: number;       // 0–1 weighted average across all segments
-  clips: ClipProgress[]; // one entry per segment
+  overall: number;       // 0–1 weighted average across all segments/clips
+  clips: ClipProgress[];
 }
 
 interface ClipProgress {
@@ -370,12 +391,12 @@ const fw = createFrameWorker({
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `render` | `(clip, opts?) => Promise<Blob>` | Render a single `ClipInput` |
+| `mergeClips` | `(clips[], opts?) => Promise<{ blob, metrics }>` | Merge multiple `ClipSource`s |
+| `mergeClipsToUrl` | `(clips[], opts?) => Promise<{ url, metrics }>` | Merge + create object URL |
+| `render` | `(clip, opts?) => Promise<Blob>` | Render a single `ClipSource` (preview use) |
 | `renderToUrl` | `(clip, opts?) => Promise<string>` | Render + create object URL |
-| `stitch` | `(clips[], opts?) => Promise<{ blob, metrics }>` | Render + concat multiple clips |
-| `stitchToUrl` | `(clips[], opts?) => Promise<{ url, metrics }>` | Stitch + create object URL |
 
-### `ClipInput`
+### `ClipSource`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -387,31 +408,51 @@ const fw = createFrameWorker({
 | `aspectRatio` | `AspectRatio` | `'16:9' \| '9:16' \| '1:1' \| '4:3' \| '3:4' \| 'original'` |
 | `volume` | `number` | Volume multiplier 0–2 |
 
+### `Segment`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `start` | `number` | Start time in seconds (absolute, within the source video) |
+| `end` | `number` | End time in seconds |
+| `captions` | `CaptionSegment[]` | Captions to overlay (timestamps are absolute) |
+
 ---
 
 ## BYOB: Bring Your Own Backend
-
-Implement the `RendererBackend` interface to use any encoder:
 
 ```ts
 import type { RendererBackend, FrameData, EncodeOptions } from 'framewebworker';
 
 const myBackend: RendererBackend = {
   name: 'my-encoder',
-  async init() {
-    // load WASM, warm up workers, etc.
-  },
+  async init() { /* load WASM, warm up workers, etc. */ },
   async encode(frames: FrameData[], opts: EncodeOptions): Promise<Blob> {
-    // frames is FrameData[] — each has .imageData (ImageData), .timestamp, .width, .height
-    // return a video Blob
+    // frames[].imageData (ImageData), .timestamp, .width, .height
   },
-  async concat(blobs: Blob[], opts: EncodeOptions): Promise<Blob> {
-    // concatenate multiple video Blobs into one
-  },
+  async concat(blobs: Blob[], opts: EncodeOptions): Promise<Blob> { /* ... */ },
 };
 
 const fw = createFrameWorker({ backend: myBackend });
 ```
+
+---
+
+## Migration from v0.1
+
+| v0.1 | v0.2 | Notes |
+|------|------|-------|
+| `render(videoUrl, segments)` | `exportClips(videoUrl, segments)` | Deprecated alias kept |
+| `renderToUrl(videoUrl, segments)` | `exportClipsToUrl(videoUrl, segments)` | Deprecated alias kept |
+| `fw.stitch(clips)` | `fw.mergeClips(clips)` | Deprecated alias kept on FrameWorker |
+| `fw.stitchToUrl(clips)` | `fw.mergeClipsToUrl(clips)` | Deprecated alias kept on FrameWorker |
+| `useRender(videoUrl, segments)` | `useExportClips(videoUrl, segments)` | Deprecated alias kept |
+| `useStitch(fw)` | `useMergeClips(fw)` | Deprecated alias kept |
+| `useClipRender(fw)` | `usePreviewClip(fw)` | Deprecated alias kept |
+| `StitchOptions` | `MergeOptions` | Deprecated type alias kept |
+| `SingleVideoRenderOptions` | `ExportOptions` | Deprecated type alias kept |
+| `ClipInput` | `ClipSource` | Deprecated type alias kept |
+
+All v0.1 names emit a `@deprecated` JSDoc warning in editors but continue to work. They will be removed in v0.3.
 
 ---
 

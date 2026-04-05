@@ -47,7 +47,8 @@ export interface CaptionOptions {
   style?: Partial<CaptionStyle>;
 }
 
-export interface ClipInput {
+/** Input descriptor for one clip source used by mergeClips() */
+export interface ClipSource {
   /** Video source: URL string, File, Blob, or HTMLVideoElement */
   source: string | File | Blob | HTMLVideoElement;
   /** Trim start in seconds (default: 0) */
@@ -63,6 +64,9 @@ export interface ClipInput {
   /** Volume multiplier 0-2 (default: 1) */
   volume?: number;
 }
+
+/** @deprecated Use ClipSource */
+export type ClipInput = ClipSource;
 
 export interface RenderOptions {
   /** Output width in pixels (default: 1280) */
@@ -135,24 +139,19 @@ export interface ClipMetrics {
 }
 
 export interface RenderMetrics {
-  totalMs: number;           // wall-clock: stitch() call → final blob
-  extractionMs: number;      // sum of all clip extraction times
-  encodingMs: number;        // sum of all clip encoding times
+  totalMs: number;           // wall-clock: mergeClips() / exportClips() call → final blob
+  extractionMs: number;      // sum of all clip/segment extraction times
+  encodingMs: number;        // sum of all clip/segment encoding times
   stitchMs: number;          // final ffmpeg concat phase
   clips: ClipMetrics[];
   framesPerSecond: number;   // total frames / (totalMs / 1000)
 }
 
+/** One time-range segment from a single source video, used by exportClips() */
 export interface Segment {
   start: number;          // seconds
   end: number;            // seconds
   captions?: CaptionSegment[];
-}
-
-/** Options for the render()/renderToUrl() single-video API */
-export interface SingleVideoRenderOptions extends Omit<StitchOptions, 'onProgress' | 'onComplete'> {
-  onProgress?: (progress: RichProgress) => void;
-  onComplete?: (metrics: RenderMetrics) => void;
 }
 
 export type ClipStatus = 'pending' | 'rendering' | 'encoding' | 'done' | 'error';
@@ -164,23 +163,39 @@ export interface ClipProgress {
 }
 
 export interface RichProgress {
-  overall: number; // 0-1, weighted average across all clips
+  overall: number; // 0-1, weighted average across all clips/segments
   clips: ClipProgress[];
 }
 
-/** Extends RenderOptions with rich per-clip progress reporting and completion metrics */
-export interface StitchOptions extends Omit<RenderOptions, 'onProgress'> {
+/** Options for mergeClips() / FrameWorker.mergeClips() */
+export interface MergeOptions extends Omit<RenderOptions, 'onProgress'> {
   onProgress?: (progress: RichProgress) => void;
   onComplete?: (metrics: RenderMetrics) => void;
 }
 
+/** @deprecated Use MergeOptions */
+export type StitchOptions = MergeOptions;
+
+/** Options for exportClips() / exportClipsToUrl() */
+export interface ExportOptions extends Omit<MergeOptions, 'onProgress' | 'onComplete'> {
+  onProgress?: (progress: RichProgress) => void;
+  onComplete?: (metrics: RenderMetrics) => void;
+}
+
+/** @deprecated Use ExportOptions */
+export type SingleVideoRenderOptions = ExportOptions;
+
 export interface FrameWorker {
-  /** Render a single clip to a Blob */
-  render(clip: ClipInput, options?: RenderOptions): Promise<Blob>;
-  /** Render a single clip and return an object URL */
-  renderToUrl(clip: ClipInput, options?: RenderOptions): Promise<string>;
-  /** Stitch multiple clips into one Blob */
-  stitch(clips: ClipInput[], options?: StitchOptions): Promise<{ blob: Blob; metrics: RenderMetrics }>;
-  /** Stitch multiple clips and return an object URL */
-  stitchToUrl(clips: ClipInput[], options?: StitchOptions): Promise<{ url: string; metrics: RenderMetrics }>;
+  /** Render a single clip to a Blob (legacy single-clip API) */
+  render(clip: ClipSource, options?: RenderOptions): Promise<Blob>;
+  /** Render a single clip and return an object URL (legacy single-clip API) */
+  renderToUrl(clip: ClipSource, options?: RenderOptions): Promise<string>;
+  /** Merge multiple clip sources into one Blob */
+  mergeClips(clips: ClipSource[], options?: MergeOptions): Promise<{ blob: Blob; metrics: RenderMetrics }>;
+  /** Merge multiple clip sources and return an object URL */
+  mergeClipsToUrl(clips: ClipSource[], options?: MergeOptions): Promise<{ url: string; metrics: RenderMetrics }>;
+  /** @deprecated Use mergeClips() */
+  stitch(clips: ClipSource[], options?: MergeOptions): Promise<{ blob: Blob; metrics: RenderMetrics }>;
+  /** @deprecated Use mergeClipsToUrl() */
+  stitchToUrl(clips: ClipSource[], options?: MergeOptions): Promise<{ url: string; metrics: RenderMetrics }>;
 }

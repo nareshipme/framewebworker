@@ -1,4 +1,4 @@
-import type { ClipInput, FrameData } from '../types.js';
+import type { ClipSource, FrameData } from '../types.js';
 import type { WorkerInbound, WorkerOutbound, TransferableFrame } from './protocol.js';
 
 const ASPECT_RATIO_MAP: Record<string, [number, number]> = {
@@ -11,7 +11,7 @@ const ASPECT_RATIO_MAP: Record<string, [number, number]> = {
 };
 
 function resolveOutputDimensions(
-  clip: ClipInput,
+  clip: ClipSource,
   videoWidth: number,
   videoHeight: number,
   width: number,
@@ -37,7 +37,7 @@ function seekVideo(video: HTMLVideoElement, time: number): Promise<void> {
 function drawVideoFrame(
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
-  clip: ClipInput,
+  clip: ClipSource,
   outW: number,
   outH: number
 ): void {
@@ -89,7 +89,7 @@ export class WorkerPool {
   }
 
   async dispatch(
-    clip: ClipInput,
+    clip: ClipSource,
     width: number,
     height: number,
     fps: number,
@@ -106,7 +106,7 @@ export class WorkerPool {
 
   private async processClip(
     worker: Worker,
-    clip: ClipInput,
+    clip: ClipSource,
     width: number,
     height: number,
     fps: number,

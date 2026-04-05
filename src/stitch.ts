@@ -1,4 +1,4 @@
-import type { ClipInput, RendererBackend, FrameData, ClipProgress, StitchOptions, ClipMetrics, RenderMetrics } from './types.js';
+import type { ClipSource, RendererBackend, FrameData, ClipProgress, MergeOptions, ClipMetrics, RenderMetrics } from './types.js';
 import { extractFrames } from './compositor.js';
 import { WorkerPool } from './worker/pool.js';
 
@@ -11,9 +11,9 @@ function supportsOffscreenWorkers(): boolean {
 }
 
 export async function stitchClips(
-  clips: ClipInput[],
+  clips: ClipSource[],
   backend: RendererBackend,
-  options: StitchOptions
+  options: MergeOptions
 ): Promise<{ blob: Blob; metrics: RenderMetrics }> {
   if (supportsOffscreenWorkers() && clips.length > 1) {
     return stitchParallel(clips, backend, options);
@@ -24,9 +24,9 @@ export async function stitchClips(
 // ── Sequential fallback (older browsers / single clip) ────────────────────────
 
 async function stitchSequential(
-  clips: ClipInput[],
+  clips: ClipSource[],
   backend: RendererBackend,
-  options: StitchOptions
+  options: MergeOptions
 ): Promise<{ blob: Blob; metrics: RenderMetrics }> {
   const fps = options.fps ?? 30;
   const width = options.width ?? 1280;
@@ -127,9 +127,9 @@ async function stitchSequential(
 // ── Parallel path (OffscreenCanvas + WorkerPool) ──────────────────────────────
 
 async function stitchParallel(
-  clips: ClipInput[],
+  clips: ClipSource[],
   backend: RendererBackend,
-  options: StitchOptions
+  options: MergeOptions
 ): Promise<{ blob: Blob; metrics: RenderMetrics }> {
   const fps = options.fps ?? 30;
   const width = options.width ?? 1280;

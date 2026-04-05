@@ -1,4 +1,4 @@
-import type { ClipInput, FrameData, RenderOptions } from './types.js';
+import type { ClipSource, FrameData, RenderOptions } from './types.js';
 import { STYLE_PRESETS, mergeStyle, getActiveCaptions, renderCaption } from './captions.js';
 
 const ASPECT_RATIO_MAP: Record<string, [number, number]> = {
@@ -11,7 +11,7 @@ const ASPECT_RATIO_MAP: Record<string, [number, number]> = {
 };
 
 function resolveOutputDimensions(
-  clip: ClipInput,
+  clip: ClipSource,
   videoWidth: number,
   videoHeight: number,
   options: RenderOptions
@@ -29,7 +29,7 @@ function resolveOutputDimensions(
 }
 
 export async function extractFrames(
-  clip: ClipInput,
+  clip: ClipSource,
   options: RenderOptions
 ): Promise<FrameData[]> {
   const fps = options.fps ?? 30;
@@ -118,7 +118,7 @@ export async function extractFrames(
 function drawVideoFrame(
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
-  clip: ClipInput,
+  clip: ClipSource,
   outW: number,
   outH: number
 ): void {
