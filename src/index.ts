@@ -18,10 +18,13 @@ export type {
   StitchOptions,
   ClipMetrics,
   RenderMetrics,
+  Segment,
+  SingleVideoRenderOptions,
 } from './types.js';
 
 export { STYLE_PRESETS } from './captions.js';
 export { FFmpegBackend, createFFmpegBackend } from './backends/ffmpeg.js';
+export { render, renderToUrl } from './render.js';
 
 import type { ClipInput, RenderOptions, StitchOptions, RenderMetrics, FrameWorkerConfig, FrameWorker, RendererBackend } from './types.js';
 import { extractFrames } from './compositor.js';

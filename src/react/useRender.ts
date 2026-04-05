@@ -2,8 +2,12 @@
 
 import { useState, useCallback, useRef } from 'react';
 import type { ClipInput, RenderOptions, FrameWorker } from '../types.js';
+import type { Segment, SingleVideoRenderOptions, RichProgress, RenderMetrics } from '../types.js';
+import { render as renderSegments } from '../render.js';
 
-export interface UseRenderState {
+// ── useClipRender — wraps FrameWorker.render(clip) ───────────────────────────
+
+export interface UseClipRenderState {
   progress: number;
   isRendering: boolean;
   error: Error | null;
@@ -11,16 +15,16 @@ export interface UseRenderState {
   url: string | null;
 }
 
-export interface UseRenderActions {
+export interface UseClipRenderActions {
   render: (clip: ClipInput, options?: Omit<RenderOptions, 'onProgress' | 'signal'>) => Promise<Blob | null>;
   cancel: () => void;
   reset: () => void;
 }
 
-export type UseRenderResult = UseRenderState & UseRenderActions;
+export type UseClipRenderResult = UseClipRenderState & UseClipRenderActions;
 
-export function useRender(frameWorker: FrameWorker): UseRenderResult {
-  const [state, setState] = useState<UseRenderState>({
+export function useClipRender(frameWorker: FrameWorker): UseClipRenderResult {
+  const [state, setState] = useState<UseClipRenderState>({
     progress: 0,
     isRendering: false,
     error: null,
@@ -85,4 +89,74 @@ export function useRender(frameWorker: FrameWorker): UseRenderResult {
   );
 
   return { ...state, render, cancel, reset };
+}
+
+// ── useRender — single-video multi-segment API ────────────────────────────────
+
+export interface UseRenderResult {
+  start: () => void;
+  cancel: () => void;
+  progress: RichProgress | null;
+  metrics: RenderMetrics | null;
+  url: string | null;
+  error: Error | null;
+  isRendering: boolean;
+}
+
+export function useRender(
+  videoUrl: string | null,
+  segments: Segment[],
+  options?: Omit<SingleVideoRenderOptions, 'onProgress' | 'onComplete' | 'signal'>
+): UseRenderResult {
+  const [isRendering, setIsRendering] = useState(false);
+  const [progress, setProgress] = useState<RichProgress | null>(null);
+  const [metrics, setMetrics] = useState<RenderMetrics | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+
+  const abortRef = useRef<AbortController | null>(null);
+  const urlRef = useRef<string | null>(null);
+
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const start = useCallback(() => {
+    if (!videoUrl || isRendering) return;
+
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsRendering(true);
+    setProgress(null);
+    setMetrics(null);
+    setUrl(null);
+    setError(null);
+
+    renderSegments(videoUrl, segments, {
+      ...options,
+      signal: controller.signal,
+      onProgress: (p) => setProgress(p),
+      onComplete: (m) => setMetrics(m),
+    }).then(({ blob }) => {
+      const objectUrl = URL.createObjectURL(blob);
+      urlRef.current = objectUrl;
+      setUrl(objectUrl);
+      setIsRendering(false);
+    }).catch((err) => {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setIsRendering(false);
+        return;
+      }
+      setError(err instanceof Error ? err : new Error(String(err)));
+      setIsRendering(false);
+    });
+  }, [videoUrl, segments, options, isRendering]);
+
+  return { start, cancel, progress, metrics, url, error, isRendering };
 }

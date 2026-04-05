@@ -143,6 +143,18 @@ export interface RenderMetrics {
   framesPerSecond: number;   // total frames / (totalMs / 1000)
 }
 
+export interface Segment {
+  start: number;          // seconds
+  end: number;            // seconds
+  captions?: CaptionSegment[];
+}
+
+/** Options for the render()/renderToUrl() single-video API */
+export interface SingleVideoRenderOptions extends Omit<StitchOptions, 'onProgress' | 'onComplete'> {
+  onProgress?: (progress: RichProgress) => void;
+  onComplete?: (metrics: RenderMetrics) => void;
+}
+
 export type ClipStatus = 'pending' | 'rendering' | 'encoding' | 'done' | 'error';
 
 export interface ClipProgress {
