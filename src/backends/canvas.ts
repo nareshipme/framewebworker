@@ -152,7 +152,7 @@ export async function recordClip(
     }
 
     const mimeType = pickMimeType();
-    const recorderInit: MediaRecorderInit = { mimeType };
+    const recorderInit: MediaRecorderOptions = { mimeType };
     if (clip.quality === 'medium') recorderInit.videoBitsPerSecond = 2_500_000;
     const recorder = new MediaRecorder(canvasStream, recorderInit);
     const chunks: Blob[] = [];
