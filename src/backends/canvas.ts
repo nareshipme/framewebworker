@@ -191,8 +191,6 @@ export async function recordClip(
 
     return await new Promise<Blob>((resolve, reject) => {
       let frameHandle = 0;
-      // eslint-disable-next-line prefer-const
-      let intervalId: ReturnType<typeof setInterval>;
       let aborted = false;
 
       function scheduleFrame() {
@@ -237,14 +235,7 @@ export async function recordClip(
       recorder.onerror = () => reject(new Error('Recording failed'));
 
       recorder.start(100);
-      // Try unmuted play; if autoplay policy blocks it, fall back to muted play
-      video.play().catch(() => {
-        video.muted = true;
-        video.play().catch(reject);
-      });
-      scheduleFrame();
-
-      intervalId = setInterval(() => {
+      const intervalId = setInterval(() => {
         if (signal?.aborted) {
           aborted = true;
           stop();
@@ -253,7 +244,12 @@ export async function recordClip(
         }
         onProgress?.(Math.min((video.currentTime - startTime) / duration, 0.99));
       }, 200);
-
+      // Try unmuted play; if autoplay policy blocks it, fall back to muted play
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(reject);
+      });
+      scheduleFrame();
       video.addEventListener('ended', stop, { once: true });
     });
   } finally {
@@ -271,6 +267,77 @@ function resolveUrl(clip: ClipSource): { url: string; needsRevoke: boolean } {
   return { url: URL.createObjectURL(clip.source as Blob), needsRevoke: true };
 }
 
+// ── helpers extracted to keep recordClips complexity ≤ 20 ──────────────────────────────────
+
+async function recordSingleClip(
+  url: string,
+  clip: ClipSource,
+  options: MergeOptions,
+  startAll: number
+): Promise<{ blob: Blob; metrics: RenderMetrics }> {
+  const { onProgress, onComplete, signal } = options;
+  const status: ClipProgress = { index: 0, status: 'rendering', progress: 0 };
+  onProgress?.({ overall: 0, clips: [status] });
+  const clipStart = performance.now();
+  const blob = await recordClip(url, clip, {
+    signal,
+    onProgress: (p) => {
+      status.progress = p;
+      onProgress?.({ overall: p, clips: [{ ...status }] });
+    },
+  });
+  const clipMs = performance.now() - clipStart;
+  onProgress?.({ overall: 1, clips: [{ index: 0, status: 'done', progress: 1 }] });
+  const totalMs = performance.now() - startAll;
+  const metrics: RenderMetrics = {
+    totalMs, extractionMs: totalMs, encodingMs: 0, stitchMs: 0,
+    clips: [{ clipId: '0', extractionMs: clipMs, encodingMs: 0, totalMs: clipMs, framesExtracted: 0 }],
+    framesPerSecond: 0,
+  };
+  onComplete?.(metrics);
+  return { blob, metrics };
+}
+
+async function trySetupAudio(
+  audioCtx: AudioContext | null,
+  video: HTMLVideoElement,
+  canvasStream: MediaStream,
+  volume?: number
+): Promise<void> {
+  if (!audioCtx) return;
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const src = audioCtx.createMediaElementSource(video);
+    const dest = audioCtx.createMediaStreamDestination();
+    const gain = audioCtx.createGain();
+    gain.gain.value = volume ?? 1;
+    src.connect(gain);
+    gain.connect(dest);
+    dest.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
+  } catch { /* CORS or unsupported */ }
+}
+
+function buildRecorderInit(mimeType: string, quality: ClipSource['quality']): MediaRecorderOptions {
+  const init: MediaRecorderOptions = { mimeType };
+  if (quality === 'medium') init.videoBitsPerSecond = 2_500_000;
+  return init;
+}
+
+function resolveCaptionStyle(clip: ClipSource) {
+  const captionSegs = clip.captions?.segments ?? [];
+  const baseStyle = mergeStyle(
+    STYLE_PRESETS[clip.captions?.style?.preset ?? 'modern'],
+    clip.captions?.style,
+  );
+  return { captionSegs, baseStyle };
+}
+
+function clipBounds(clip: ClipSource, videoDuration: number) {
+  const startTime = clip.startTime ?? 0;
+  const endTime = clip.endTime ?? videoDuration;
+  return { startTime, endTime, duration: endTime - startTime };
+}
+
 export async function recordClips(
   clips: ClipSource[],
   options: MergeOptions = {}
@@ -285,6 +352,8 @@ export async function recordClips(
   }));
   const clipMetrics: ClipMetrics[] = [];
 
+  const isAborted = () => signal?.aborted;
+
   let lastOverall = 0;
   function emit(overall: number, paused = false) {
     lastOverall = overall;
@@ -294,32 +363,8 @@ export async function recordClips(
   // Single clip: delegate straight to recordClip (produces a single valid stream).
   if (clips.length === 1) {
     const { url, needsRevoke } = resolveUrl(clips[0]);
-    clipStatuses[0].status = 'rendering';
-    emit(0);
-    const clipStart = performance.now();
     try {
-      const blob = await recordClip(url, clips[0], {
-        signal,
-        onProgress: (p) => {
-          clipStatuses[0].progress = p;
-          emit(p);
-        },
-      });
-      const clipMs = performance.now() - clipStart;
-      clipStatuses[0].status = 'done';
-      clipStatuses[0].progress = 1;
-      onProgress?.({ overall: 1, clips: [{ index: 0, status: 'done', progress: 1 }] });
-      const totalMs = performance.now() - startAll;
-      const metrics: RenderMetrics = {
-        totalMs,
-        extractionMs: totalMs,
-        encodingMs: 0,
-        stitchMs: 0,
-        clips: [{ clipId: '0', extractionMs: clipMs, encodingMs: 0, totalMs: clipMs, framesExtracted: 0 }],
-        framesPerSecond: 0,
-      };
-      onComplete?.(metrics);
-      return { blob, metrics };
+      return await recordSingleClip(url, clips[0], options, startAll);
     } finally {
       if (needsRevoke) URL.revokeObjectURL(url);
     }
@@ -345,7 +390,6 @@ export async function recordClips(
   try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
   // Declared here so finally can removeEventListener even if try throws before assignment.
-  // eslint-disable-next-line prefer-const
   let onVisibilityChange: () => void = () => {};
 
   try {
@@ -368,23 +412,10 @@ export async function recordClips(
     const canvasStream = canvas.captureStream(30);
     video.muted = false;
 
-    if (audioCtx) {
-      try {
-        if (audioCtx.state === 'suspended') await audioCtx.resume();
-        const audioSrc = audioCtx.createMediaElementSource(video);
-        const audioDest = audioCtx.createMediaStreamDestination();
-        const gain = audioCtx.createGain();
-        gain.gain.value = clips[0].volume ?? 1;
-        audioSrc.connect(gain);
-        gain.connect(audioDest);
-        audioDest.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
-      } catch { /* CORS or unsupported — continue video-only */ }
-    }
+    await trySetupAudio(audioCtx, video, canvasStream, clips[0].volume);
 
     const mimeType = pickMimeType();
-    const recorderInit: MediaRecorderOptions = { mimeType };
-    if (clips[0].quality === 'medium') recorderInit.videoBitsPerSecond = 2_500_000;
-    const recorder = new MediaRecorder(canvasStream, recorderInit);
+    const recorder = new MediaRecorder(canvasStream, buildRecorderInit(mimeType, clips[0].quality));
     const chunks: Blob[] = [];
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
@@ -408,7 +439,7 @@ export async function recordClips(
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     for (let ci = 0; ci < clips.length; ci++) {
-      if (signal?.aborted) break;
+      if (isAborted()) break;
 
       const clip = clips[ci];
       const resolved = resolveUrl(clip);
@@ -426,26 +457,19 @@ export async function recordClips(
         video.muted = false;
       }
 
-      const startTime = clip.startTime ?? 0;
-      const endTime = clip.endTime ?? video.duration;
-      const duration = endTime - startTime;
+      const { startTime, endTime, duration } = clipBounds(clip, video.duration);
       const layout = computeLayout(clip, video.videoWidth, video.videoHeight);
-      const captionSegs = clip.captions?.segments ?? [];
-      const baseStyle = mergeStyle(
-        STYLE_PRESETS[clip.captions?.style?.preset ?? 'modern'],
-        clip.captions?.style
-      );
+      const { captionSegs, baseStyle } = resolveCaptionStyle(clip);
 
       clipStatuses[ci].status = 'rendering';
       emit(ci / clips.length);
 
       const clipStart = performance.now();
       await seekTo(video, startTime);
-      if (signal?.aborted) break;
+      if (isAborted()) break;
 
       await new Promise<void>((resolve, reject) => {
         let frameHandle = 0;
-        let intervalId: ReturnType<typeof setInterval>;
         let settled = false;
 
         function scheduleFrame() {
@@ -495,7 +519,7 @@ export async function recordClips(
           }
         }
 
-        intervalId = setInterval(() => {
+        const intervalId = setInterval(() => {
           if (signal?.aborted) { abort(); return; }
           clipStatuses[ci].progress = Math.min((video.currentTime - startTime) / duration, 0.99);
           emit((ci + clipStatuses[ci].progress) / clips.length);
@@ -510,7 +534,7 @@ export async function recordClips(
         video.addEventListener('ended', finish, { once: true });
       });
 
-      if (signal?.aborted) break;
+      if (isAborted()) break;
 
       const clipMs = performance.now() - clipStart;
       clipStatuses[ci].status = 'done';
@@ -531,7 +555,7 @@ export async function recordClips(
       if (recorder.state !== 'inactive') recorder.stop();
     });
 
-    if (signal?.aborted) throw new DOMException('Render cancelled', 'AbortError');
+    if (isAborted()) throw new DOMException('Render cancelled', 'AbortError');
 
     onProgress?.({ overall: 1, clips: clipStatuses.map((s) => ({ ...s, progress: 1 })) });
 
