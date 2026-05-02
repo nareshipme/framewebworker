@@ -276,60 +276,248 @@ export async function recordClips(
     onProgress?.({ overall, clips: clipStatuses.slice() });
   }
 
-  const blobs: Blob[] = [];
-
-  for (let ci = 0; ci < clips.length; ci++) {
-    if (signal?.aborted) throw new DOMException('Render cancelled', 'AbortError');
-
-    clipStatuses[ci].status = 'rendering';
-    emit(ci / clips.length);
-
-    const { url, needsRevoke } = resolveUrl(clips[ci]);
+  // Single clip: delegate straight to recordClip (produces a single valid stream).
+  if (clips.length === 1) {
+    const { url, needsRevoke } = resolveUrl(clips[0]);
+    clipStatuses[0].status = 'rendering';
+    emit(0);
     const clipStart = performance.now();
-
     try {
-      const blob = await recordClip(url, clips[ci], {
+      const blob = await recordClip(url, clips[0], {
         signal,
         onProgress: (p) => {
-          clipStatuses[ci].progress = p;
-          emit((ci + p) / clips.length);
+          clipStatuses[0].progress = p;
+          emit(p);
         },
       });
-      blobs.push(blob);
+      const clipMs = performance.now() - clipStart;
+      clipStatuses[0].status = 'done';
+      clipStatuses[0].progress = 1;
+      onProgress?.({ overall: 1, clips: [{ index: 0, status: 'done', progress: 1 }] });
+      const totalMs = performance.now() - startAll;
+      const metrics: RenderMetrics = {
+        totalMs,
+        extractionMs: totalMs,
+        encodingMs: 0,
+        stitchMs: 0,
+        clips: [{ clipId: '0', extractionMs: clipMs, encodingMs: 0, totalMs: clipMs, framesExtracted: 0 }],
+        framesPerSecond: 0,
+      };
+      onComplete?.(metrics);
+      return { blob, metrics };
     } finally {
       if (needsRevoke) URL.revokeObjectURL(url);
     }
-
-    const clipMs = performance.now() - clipStart;
-    clipStatuses[ci].status = 'done';
-    clipStatuses[ci].progress = 1;
-    clipMetrics.push({
-      clipId: String(ci),
-      extractionMs: clipMs,
-      encodingMs: 0,
-      totalMs: clipMs,
-      framesExtracted: 0,
-    });
-    emit((ci + 1) / clips.length);
   }
 
-  onProgress?.({ overall: 1, clips: clipStatuses.map((s) => ({ ...s, progress: 1 })) });
+  // Multiple clips: one canvas + one MediaRecorder records all clips in a single
+  // continuous stream. Blob-concatenating separate WebM recordings does not produce
+  // a valid playable file because each recording has its own initialization segment
+  // and timestamps, causing browsers to stop video playback after the first clip.
+  const firstResolved = resolveUrl(clips[0]);
+  const urlsToRevoke: string[] = [];
+  if (firstResolved.needsRevoke) urlsToRevoke.push(firstResolved.url);
 
-  const finalBlob =
-    blobs.length === 1 ? blobs[0] : new Blob(blobs, { type: blobs[0].type });
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+  video.muted = true;
+  video.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px';
+  document.body.appendChild(video);
 
-  const totalMs = performance.now() - startAll;
-  const metrics: RenderMetrics = {
-    totalMs,
-    extractionMs: totalMs,
-    encodingMs: 0,
-    stitchMs: 0,
-    clips: clipMetrics,
-    framesPerSecond: 0,
-  };
+  // Create AudioContext early (close to user gesture) so resume() succeeds.
+  let audioCtx: AudioContext | null = null;
+  try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
-  onComplete?.(metrics);
-  return { blob: finalBlob, metrics };
+  try {
+    let currentUrl = firstResolved.url;
+
+    await new Promise<void>((resolve, reject) => {
+      video.addEventListener('canplaythrough', () => resolve(), { once: true });
+      video.addEventListener('error', () => reject(new Error(`Failed to load video: ${currentUrl}`)), { once: true });
+      video.preload = 'auto';
+      video.src = currentUrl;
+      video.load();
+    });
+
+    const { canvasW, canvasH } = computeLayout(clips[0], video.videoWidth, video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d')!;
+
+    const canvasStream = canvas.captureStream(30);
+    video.muted = false;
+
+    if (audioCtx) {
+      try {
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        const audioSrc = audioCtx.createMediaElementSource(video);
+        const audioDest = audioCtx.createMediaStreamDestination();
+        const gain = audioCtx.createGain();
+        gain.gain.value = clips[0].volume ?? 1;
+        audioSrc.connect(gain);
+        gain.connect(audioDest);
+        audioDest.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
+      } catch { /* CORS or unsupported — continue video-only */ }
+    }
+
+    const mimeType = pickMimeType();
+    const recorderInit: MediaRecorderOptions = { mimeType };
+    if (clips[0].quality === 'medium') recorderInit.videoBitsPerSecond = 2_500_000;
+    const recorder = new MediaRecorder(canvasStream, recorderInit);
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    const supportsRVFC = 'requestVideoFrameCallback' in video;
+
+    recorder.start(100);
+
+    for (let ci = 0; ci < clips.length; ci++) {
+      if (signal?.aborted) break;
+
+      const clip = clips[ci];
+      const resolved = resolveUrl(clip);
+      if (resolved.needsRevoke) urlsToRevoke.push(resolved.url);
+
+      if (resolved.url !== currentUrl) {
+        currentUrl = resolved.url;
+        video.muted = true;
+        await new Promise<void>((resolve, reject) => {
+          video.addEventListener('canplaythrough', () => resolve(), { once: true });
+          video.addEventListener('error', () => reject(new Error(`Failed to load video: ${currentUrl}`)), { once: true });
+          video.src = currentUrl;
+          video.load();
+        });
+        video.muted = false;
+      }
+
+      const startTime = clip.startTime ?? 0;
+      const endTime = clip.endTime ?? video.duration;
+      const duration = endTime - startTime;
+      const layout = computeLayout(clip, video.videoWidth, video.videoHeight);
+      const captionSegs = clip.captions?.segments ?? [];
+      const baseStyle = mergeStyle(
+        STYLE_PRESETS[clip.captions?.style?.preset ?? 'modern'],
+        clip.captions?.style
+      );
+
+      clipStatuses[ci].status = 'rendering';
+      emit(ci / clips.length);
+
+      const clipStart = performance.now();
+      await seekTo(video, startTime);
+      if (signal?.aborted) break;
+
+      await new Promise<void>((resolve, reject) => {
+        let frameHandle = 0;
+        let intervalId: ReturnType<typeof setInterval>;
+        let settled = false;
+
+        function scheduleFrame() {
+          if (supportsRVFC) {
+            frameHandle = (video as HTMLVideoElement & { requestVideoFrameCallback(cb: () => void): number }).requestVideoFrameCallback(drawFrame);
+          } else {
+            frameHandle = requestAnimationFrame(drawFrame);
+          }
+        }
+
+        function cancelFrame() {
+          if (supportsRVFC) {
+            (video as HTMLVideoElement & { cancelVideoFrameCallback(id: number): void }).cancelVideoFrameCallback(frameHandle);
+          } else {
+            cancelAnimationFrame(frameHandle);
+          }
+        }
+
+        function finish() {
+          if (settled) return;
+          settled = true;
+          cancelFrame();
+          clearInterval(intervalId);
+          video.pause();
+          resolve();
+        }
+
+        function abort() {
+          if (settled) return;
+          settled = true;
+          cancelFrame();
+          clearInterval(intervalId);
+          video.pause();
+          reject(new DOMException('Render cancelled', 'AbortError'));
+        }
+
+        function drawFrame() {
+          ctx.drawImage(video, layout.srcX, layout.srcY, layout.srcW, layout.srcH, 0, 0, canvasW, canvasH);
+          const clipTime = video.currentTime - startTime;
+          for (const seg of getActiveCaptions(captionSegs, clipTime)) {
+            renderCaption(ctx, seg, mergeStyle(baseStyle, seg.style), canvasW, canvasH);
+          }
+          if (video.currentTime < endTime) {
+            scheduleFrame();
+          } else {
+            finish();
+          }
+        }
+
+        intervalId = setInterval(() => {
+          if (signal?.aborted) { abort(); return; }
+          clipStatuses[ci].progress = Math.min((video.currentTime - startTime) / duration, 0.99);
+          emit((ci + clipStatuses[ci].progress) / clips.length);
+        }, 200);
+
+        video.play().catch(() => {
+          video.muted = true;
+          video.play().catch(reject);
+        });
+        scheduleFrame();
+
+        video.addEventListener('ended', finish, { once: true });
+      });
+
+      if (signal?.aborted) break;
+
+      const clipMs = performance.now() - clipStart;
+      clipStatuses[ci].status = 'done';
+      clipStatuses[ci].progress = 1;
+      clipMetrics.push({
+        clipId: String(ci),
+        extractionMs: clipMs,
+        encodingMs: 0,
+        totalMs: clipMs,
+        framesExtracted: 0,
+      });
+      emit((ci + 1) / clips.length);
+    }
+
+    const finalBlob = await new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+      recorder.onerror = () => reject(new Error('Recording failed'));
+      if (recorder.state !== 'inactive') recorder.stop();
+    });
+
+    if (signal?.aborted) throw new DOMException('Render cancelled', 'AbortError');
+
+    onProgress?.({ overall: 1, clips: clipStatuses.map((s) => ({ ...s, progress: 1 })) });
+
+    const totalMs = performance.now() - startAll;
+    const metrics: RenderMetrics = {
+      totalMs,
+      extractionMs: totalMs,
+      encodingMs: 0,
+      stitchMs: 0,
+      clips: clipMetrics,
+      framesPerSecond: 0,
+    };
+    onComplete?.(metrics);
+    return { blob: finalBlob, metrics };
+
+  } finally {
+    video.remove();
+    if (audioCtx) audioCtx.close().catch(() => {});
+    for (const url of urlsToRevoke) URL.revokeObjectURL(url);
+  }
 }
 
 export function isCanvasRecordingSupported(): boolean {
