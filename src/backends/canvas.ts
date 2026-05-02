@@ -106,6 +106,18 @@ export async function recordClip(
   let audioCtx: AudioContext | null = null;
   try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
+  // Pause/resume the video when the tab is hidden so the browser doesn't stall
+  // recording mid-clip. The recorder keeps running (frozen frame) — acceptable for
+  // single clips which are short.
+  function onVisibilityChangeSingle() {
+    if (document.hidden) {
+      video.pause();
+    } else {
+      video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+    }
+  }
+  document.addEventListener('visibilitychange', onVisibilityChangeSingle);
+
   try {
     await new Promise<void>((resolve, reject) => {
       // canplaythrough = browser has buffered enough to play without stalling.
@@ -245,6 +257,7 @@ export async function recordClip(
       video.addEventListener('ended', stop, { once: true });
     });
   } finally {
+    document.removeEventListener('visibilitychange', onVisibilityChangeSingle);
     video.remove();
     if (audioCtx) {
       audioCtx.close().catch(() => {});
@@ -272,8 +285,10 @@ export async function recordClips(
   }));
   const clipMetrics: ClipMetrics[] = [];
 
-  function emit(overall: number) {
-    onProgress?.({ overall, clips: clipStatuses.slice() });
+  let lastOverall = 0;
+  function emit(overall: number, paused = false) {
+    lastOverall = overall;
+    onProgress?.({ overall, clips: clipStatuses.slice(), paused });
   }
 
   // Single clip: delegate straight to recordClip (produces a single valid stream).
@@ -329,6 +344,10 @@ export async function recordClips(
   let audioCtx: AudioContext | null = null;
   try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
+  // Declared here so finally can removeEventListener even if try throws before assignment.
+  // eslint-disable-next-line prefer-const
+  let onVisibilityChange: () => void = () => {};
+
   try {
     let currentUrl = firstResolved.url;
 
@@ -372,6 +391,21 @@ export async function recordClips(
     const supportsRVFC = 'requestVideoFrameCallback' in video;
 
     recorder.start(100);
+
+    // Pause video + recorder when the tab is hidden so the browser doesn't stall
+    // mid-render. Emits paused:true/false so the UI can show a resume hint.
+    onVisibilityChange = () => {
+      if (document.hidden) {
+        video.pause();
+        try { if (recorder.state === 'recording') recorder.pause(); } catch { /* unsupported */ }
+        emit(lastOverall, true);
+      } else {
+        try { if (recorder.state === 'paused') recorder.resume(); } catch { /* unsupported */ }
+        video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+        emit(lastOverall, false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     for (let ci = 0; ci < clips.length; ci++) {
       if (signal?.aborted) break;
@@ -514,6 +548,7 @@ export async function recordClips(
     return { blob: finalBlob, metrics };
 
   } finally {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
     video.remove();
     if (audioCtx) audioCtx.close().catch(() => {});
     for (const url of urlsToRevoke) URL.revokeObjectURL(url);
