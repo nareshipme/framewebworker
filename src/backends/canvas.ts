@@ -185,7 +185,7 @@ export async function recordClip(
 
       function scheduleFrame() {
         if (supportsRVFC) {
-          frameHandle = (video as any).requestVideoFrameCallback(drawFrame);
+          frameHandle = (video as HTMLVideoElement & { requestVideoFrameCallback(cb: () => void): number }).requestVideoFrameCallback(drawFrame);
         } else {
           frameHandle = requestAnimationFrame(drawFrame);
         }
@@ -193,7 +193,7 @@ export async function recordClip(
 
       function cancelFrame() {
         if (supportsRVFC) {
-          (video as any).cancelVideoFrameCallback(frameHandle);
+          (video as HTMLVideoElement & { cancelVideoFrameCallback(id: number): void }).cancelVideoFrameCallback(frameHandle);
         } else {
           cancelAnimationFrame(frameHandle);
         }
