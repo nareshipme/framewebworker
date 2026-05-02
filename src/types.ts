@@ -152,6 +152,8 @@ export interface ClipProgress {
 export interface RichProgress {
   overall: number; // 0-1, weighted average across all clips/segments
   clips: ClipProgress[];
+  /** True while the browser has backgrounded the tab and rendering is paused. */
+  paused?: boolean;
 }
 
 /** Options for mergeClips() / FrameWorker.mergeClips() */

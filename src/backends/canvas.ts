@@ -106,6 +106,18 @@ export async function recordClip(
   let audioCtx: AudioContext | null = null;
   try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
+  // Pause/resume the video when the tab is hidden so the browser doesn't stall
+  // recording mid-clip. The recorder keeps running (frozen frame) — acceptable for
+  // single clips which are short.
+  function onVisibilityChangeSingle() {
+    if (document.hidden) {
+      video.pause();
+    } else {
+      video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+    }
+  }
+  document.addEventListener('visibilitychange', onVisibilityChangeSingle);
+
   try {
     await new Promise<void>((resolve, reject) => {
       // canplaythrough = browser has buffered enough to play without stalling.
@@ -179,8 +191,6 @@ export async function recordClip(
 
     return await new Promise<Blob>((resolve, reject) => {
       let frameHandle = 0;
-      // eslint-disable-next-line prefer-const
-      let intervalId: ReturnType<typeof setInterval>;
       let aborted = false;
 
       function scheduleFrame() {
@@ -225,14 +235,7 @@ export async function recordClip(
       recorder.onerror = () => reject(new Error('Recording failed'));
 
       recorder.start(100);
-      // Try unmuted play; if autoplay policy blocks it, fall back to muted play
-      video.play().catch(() => {
-        video.muted = true;
-        video.play().catch(reject);
-      });
-      scheduleFrame();
-
-      intervalId = setInterval(() => {
+      const intervalId = setInterval(() => {
         if (signal?.aborted) {
           aborted = true;
           stop();
@@ -241,10 +244,16 @@ export async function recordClip(
         }
         onProgress?.(Math.min((video.currentTime - startTime) / duration, 0.99));
       }, 200);
-
+      // Try unmuted play; if autoplay policy blocks it, fall back to muted play
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(reject);
+      });
+      scheduleFrame();
       video.addEventListener('ended', stop, { once: true });
     });
   } finally {
+    document.removeEventListener('visibilitychange', onVisibilityChangeSingle);
     video.remove();
     if (audioCtx) {
       audioCtx.close().catch(() => {});
@@ -256,6 +265,77 @@ function resolveUrl(clip: ClipSource): { url: string; needsRevoke: boolean } {
   if (typeof clip.source === 'string') return { url: clip.source, needsRevoke: false };
   if (clip.source instanceof HTMLVideoElement) return { url: clip.source.src, needsRevoke: false };
   return { url: URL.createObjectURL(clip.source as Blob), needsRevoke: true };
+}
+
+// ── helpers extracted to keep recordClips complexity ≤ 20 ──────────────────────────────────
+
+async function recordSingleClip(
+  url: string,
+  clip: ClipSource,
+  options: MergeOptions,
+  startAll: number
+): Promise<{ blob: Blob; metrics: RenderMetrics }> {
+  const { onProgress, onComplete, signal } = options;
+  const status: ClipProgress = { index: 0, status: 'rendering', progress: 0 };
+  onProgress?.({ overall: 0, clips: [status] });
+  const clipStart = performance.now();
+  const blob = await recordClip(url, clip, {
+    signal,
+    onProgress: (p) => {
+      status.progress = p;
+      onProgress?.({ overall: p, clips: [{ ...status }] });
+    },
+  });
+  const clipMs = performance.now() - clipStart;
+  onProgress?.({ overall: 1, clips: [{ index: 0, status: 'done', progress: 1 }] });
+  const totalMs = performance.now() - startAll;
+  const metrics: RenderMetrics = {
+    totalMs, extractionMs: totalMs, encodingMs: 0, stitchMs: 0,
+    clips: [{ clipId: '0', extractionMs: clipMs, encodingMs: 0, totalMs: clipMs, framesExtracted: 0 }],
+    framesPerSecond: 0,
+  };
+  onComplete?.(metrics);
+  return { blob, metrics };
+}
+
+async function trySetupAudio(
+  audioCtx: AudioContext | null,
+  video: HTMLVideoElement,
+  canvasStream: MediaStream,
+  volume?: number
+): Promise<void> {
+  if (!audioCtx) return;
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const src = audioCtx.createMediaElementSource(video);
+    const dest = audioCtx.createMediaStreamDestination();
+    const gain = audioCtx.createGain();
+    gain.gain.value = volume ?? 1;
+    src.connect(gain);
+    gain.connect(dest);
+    dest.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
+  } catch { /* CORS or unsupported */ }
+}
+
+function buildRecorderInit(mimeType: string, quality: ClipSource['quality']): MediaRecorderOptions {
+  const init: MediaRecorderOptions = { mimeType };
+  if (quality === 'medium') init.videoBitsPerSecond = 2_500_000;
+  return init;
+}
+
+function resolveCaptionStyle(clip: ClipSource) {
+  const captionSegs = clip.captions?.segments ?? [];
+  const baseStyle = mergeStyle(
+    STYLE_PRESETS[clip.captions?.style?.preset ?? 'modern'],
+    clip.captions?.style,
+  );
+  return { captionSegs, baseStyle };
+}
+
+function clipBounds(clip: ClipSource, videoDuration: number) {
+  const startTime = clip.startTime ?? 0;
+  const endTime = clip.endTime ?? videoDuration;
+  return { startTime, endTime, duration: endTime - startTime };
 }
 
 export async function recordClips(
@@ -272,64 +352,231 @@ export async function recordClips(
   }));
   const clipMetrics: ClipMetrics[] = [];
 
-  function emit(overall: number) {
-    onProgress?.({ overall, clips: clipStatuses.slice() });
+  const isAborted = () => signal?.aborted;
+
+  let lastOverall = 0;
+  function emit(overall: number, paused = false) {
+    lastOverall = overall;
+    onProgress?.({ overall, clips: clipStatuses.slice(), paused });
   }
 
-  const blobs: Blob[] = [];
-
-  for (let ci = 0; ci < clips.length; ci++) {
-    if (signal?.aborted) throw new DOMException('Render cancelled', 'AbortError');
-
-    clipStatuses[ci].status = 'rendering';
-    emit(ci / clips.length);
-
-    const { url, needsRevoke } = resolveUrl(clips[ci]);
-    const clipStart = performance.now();
-
+  // Single clip: delegate straight to recordClip (produces a single valid stream).
+  if (clips.length === 1) {
+    const { url, needsRevoke } = resolveUrl(clips[0]);
     try {
-      const blob = await recordClip(url, clips[ci], {
-        signal,
-        onProgress: (p) => {
-          clipStatuses[ci].progress = p;
-          emit((ci + p) / clips.length);
-        },
-      });
-      blobs.push(blob);
+      return await recordSingleClip(url, clips[0], options, startAll);
     } finally {
       if (needsRevoke) URL.revokeObjectURL(url);
     }
-
-    const clipMs = performance.now() - clipStart;
-    clipStatuses[ci].status = 'done';
-    clipStatuses[ci].progress = 1;
-    clipMetrics.push({
-      clipId: String(ci),
-      extractionMs: clipMs,
-      encodingMs: 0,
-      totalMs: clipMs,
-      framesExtracted: 0,
-    });
-    emit((ci + 1) / clips.length);
   }
 
-  onProgress?.({ overall: 1, clips: clipStatuses.map((s) => ({ ...s, progress: 1 })) });
+  // Multiple clips: one canvas + one MediaRecorder records all clips in a single
+  // continuous stream. Blob-concatenating separate WebM recordings does not produce
+  // a valid playable file because each recording has its own initialization segment
+  // and timestamps, causing browsers to stop video playback after the first clip.
+  const firstResolved = resolveUrl(clips[0]);
+  const urlsToRevoke: string[] = [];
+  if (firstResolved.needsRevoke) urlsToRevoke.push(firstResolved.url);
 
-  const finalBlob =
-    blobs.length === 1 ? blobs[0] : new Blob(blobs, { type: blobs[0].type });
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+  video.muted = true;
+  video.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px';
+  document.body.appendChild(video);
 
-  const totalMs = performance.now() - startAll;
-  const metrics: RenderMetrics = {
-    totalMs,
-    extractionMs: totalMs,
-    encodingMs: 0,
-    stitchMs: 0,
-    clips: clipMetrics,
-    framesPerSecond: 0,
-  };
+  // Create AudioContext early (close to user gesture) so resume() succeeds.
+  let audioCtx: AudioContext | null = null;
+  try { audioCtx = new AudioContext(); } catch { /* not supported */ }
 
-  onComplete?.(metrics);
-  return { blob: finalBlob, metrics };
+  // Declared here so finally can removeEventListener even if try throws before assignment.
+  let onVisibilityChange: () => void = () => {};
+
+  try {
+    let currentUrl = firstResolved.url;
+
+    await new Promise<void>((resolve, reject) => {
+      video.addEventListener('canplaythrough', () => resolve(), { once: true });
+      video.addEventListener('error', () => reject(new Error(`Failed to load video: ${currentUrl}`)), { once: true });
+      video.preload = 'auto';
+      video.src = currentUrl;
+      video.load();
+    });
+
+    const { canvasW, canvasH } = computeLayout(clips[0], video.videoWidth, video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d')!;
+
+    const canvasStream = canvas.captureStream(30);
+    video.muted = false;
+
+    await trySetupAudio(audioCtx, video, canvasStream, clips[0].volume);
+
+    const mimeType = pickMimeType();
+    const recorder = new MediaRecorder(canvasStream, buildRecorderInit(mimeType, clips[0].quality));
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    const supportsRVFC = 'requestVideoFrameCallback' in video;
+
+    recorder.start(100);
+
+    // Pause video + recorder when the tab is hidden so the browser doesn't stall
+    // mid-render. Emits paused:true/false so the UI can show a resume hint.
+    onVisibilityChange = () => {
+      if (document.hidden) {
+        video.pause();
+        try { if (recorder.state === 'recording') recorder.pause(); } catch { /* unsupported */ }
+        emit(lastOverall, true);
+      } else {
+        try { if (recorder.state === 'paused') recorder.resume(); } catch { /* unsupported */ }
+        video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
+        emit(lastOverall, false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    for (let ci = 0; ci < clips.length; ci++) {
+      if (isAborted()) break;
+
+      const clip = clips[ci];
+      const resolved = resolveUrl(clip);
+      if (resolved.needsRevoke) urlsToRevoke.push(resolved.url);
+
+      if (resolved.url !== currentUrl) {
+        currentUrl = resolved.url;
+        video.muted = true;
+        await new Promise<void>((resolve, reject) => {
+          video.addEventListener('canplaythrough', () => resolve(), { once: true });
+          video.addEventListener('error', () => reject(new Error(`Failed to load video: ${currentUrl}`)), { once: true });
+          video.src = currentUrl;
+          video.load();
+        });
+        video.muted = false;
+      }
+
+      const { startTime, endTime, duration } = clipBounds(clip, video.duration);
+      const layout = computeLayout(clip, video.videoWidth, video.videoHeight);
+      const { captionSegs, baseStyle } = resolveCaptionStyle(clip);
+
+      clipStatuses[ci].status = 'rendering';
+      emit(ci / clips.length);
+
+      const clipStart = performance.now();
+      await seekTo(video, startTime);
+      if (isAborted()) break;
+
+      await new Promise<void>((resolve, reject) => {
+        let frameHandle = 0;
+        let settled = false;
+
+        function scheduleFrame() {
+          if (supportsRVFC) {
+            frameHandle = (video as HTMLVideoElement & { requestVideoFrameCallback(cb: () => void): number }).requestVideoFrameCallback(drawFrame);
+          } else {
+            frameHandle = requestAnimationFrame(drawFrame);
+          }
+        }
+
+        function cancelFrame() {
+          if (supportsRVFC) {
+            (video as HTMLVideoElement & { cancelVideoFrameCallback(id: number): void }).cancelVideoFrameCallback(frameHandle);
+          } else {
+            cancelAnimationFrame(frameHandle);
+          }
+        }
+
+        function finish() {
+          if (settled) return;
+          settled = true;
+          cancelFrame();
+          clearInterval(intervalId);
+          video.pause();
+          resolve();
+        }
+
+        function abort() {
+          if (settled) return;
+          settled = true;
+          cancelFrame();
+          clearInterval(intervalId);
+          video.pause();
+          reject(new DOMException('Render cancelled', 'AbortError'));
+        }
+
+        function drawFrame() {
+          ctx.drawImage(video, layout.srcX, layout.srcY, layout.srcW, layout.srcH, 0, 0, canvasW, canvasH);
+          const clipTime = video.currentTime - startTime;
+          for (const seg of getActiveCaptions(captionSegs, clipTime)) {
+            renderCaption(ctx, seg, mergeStyle(baseStyle, seg.style), canvasW, canvasH);
+          }
+          if (video.currentTime < endTime) {
+            scheduleFrame();
+          } else {
+            finish();
+          }
+        }
+
+        const intervalId = setInterval(() => {
+          if (signal?.aborted) { abort(); return; }
+          clipStatuses[ci].progress = Math.min((video.currentTime - startTime) / duration, 0.99);
+          emit((ci + clipStatuses[ci].progress) / clips.length);
+        }, 200);
+
+        video.play().catch(() => {
+          video.muted = true;
+          video.play().catch(reject);
+        });
+        scheduleFrame();
+
+        video.addEventListener('ended', finish, { once: true });
+      });
+
+      if (isAborted()) break;
+
+      const clipMs = performance.now() - clipStart;
+      clipStatuses[ci].status = 'done';
+      clipStatuses[ci].progress = 1;
+      clipMetrics.push({
+        clipId: String(ci),
+        extractionMs: clipMs,
+        encodingMs: 0,
+        totalMs: clipMs,
+        framesExtracted: 0,
+      });
+      emit((ci + 1) / clips.length);
+    }
+
+    const finalBlob = await new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+      recorder.onerror = () => reject(new Error('Recording failed'));
+      if (recorder.state !== 'inactive') recorder.stop();
+    });
+
+    if (isAborted()) throw new DOMException('Render cancelled', 'AbortError');
+
+    onProgress?.({ overall: 1, clips: clipStatuses.map((s) => ({ ...s, progress: 1 })) });
+
+    const totalMs = performance.now() - startAll;
+    const metrics: RenderMetrics = {
+      totalMs,
+      extractionMs: totalMs,
+      encodingMs: 0,
+      stitchMs: 0,
+      clips: clipMetrics,
+      framesPerSecond: 0,
+    };
+    onComplete?.(metrics);
+    return { blob: finalBlob, metrics };
+
+  } finally {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    video.remove();
+    if (audioCtx) audioCtx.close().catch(() => {});
+    for (const url of urlsToRevoke) URL.revokeObjectURL(url);
+  }
 }
 
 export function isCanvasRecordingSupported(): boolean {
